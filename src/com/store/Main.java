@@ -4,6 +4,10 @@ import com.store.api.KeyValueStore;
 import com.store.core.KeyValueStoreBuilder;
 import com.store.eviction.EvictionPolicy;
 
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Scanner;
 
@@ -99,6 +103,43 @@ public class Main {
                         }
                         break;
 
+                    case "MGET":
+                        if (parts.length < 2) {
+                            System.out.println("Usage: MGET <key1> <key2> ...");
+                        } else {
+                            List<String> keys = Arrays.asList(parts).subList(1, parts.length);
+                            Map<String, String> results = store.getAll(keys);
+                            for (int i = 0; i < keys.size(); i++) {
+                                String k = keys.get(i);
+                                String val = results.get(k);
+                                System.out.printf("%d) \"%s\": %s%n", i + 1, k, val != null ? "\"" + val + "\"" : "(nil)");
+                            }
+                        }
+                        break;
+
+                    case "MSET":
+                        if (parts.length < 3 || (parts.length - 1) % 2 != 0) {
+                            System.out.println("Usage: MSET <key1> <value1> [<key2> <value2> ...]");
+                        } else {
+                            Map<String, String> batch = new LinkedHashMap<>();
+                            for (int i = 1; i < parts.length; i += 2) {
+                                batch.put(parts[i], parts[i + 1]);
+                            }
+                            store.putAll(batch);
+                            System.out.printf("OK: Stored %d entries in batch.%n", batch.size());
+                        }
+                        break;
+
+                    case "MDEL":
+                        if (parts.length < 2) {
+                            System.out.println("Usage: MDEL <key1> <key2> ...");
+                        } else {
+                            List<String> keys = Arrays.asList(parts).subList(1, parts.length);
+                            int deleted = store.removeAll(keys);
+                            System.out.printf("OK: %d keys deleted.%n", deleted);
+                        }
+                        break;
+
                     case "EXISTS":
                         if (parts.length < 2) {
                             System.out.println("Usage: EXISTS <key>");
@@ -142,6 +183,9 @@ public class Main {
         System.out.println("  PUT <key> <value> [ttlMillis] - Insert or update a key with optional TTL (ms)");
         System.out.println("  GET <key>                     - Retrieve the value for a key");
         System.out.println("  DEL <key>                     - Delete a key from the store");
+        System.out.println("  MGET <key1> <key2> ...        - Batch retrieve multiple keys at once");
+        System.out.println("  MSET <k1> <v1> [<k2> <v2>...] - Batch insert multiple key-value pairs");
+        System.out.println("  MDEL <key1> <key2> ...        - Batch delete multiple keys at once");
         System.out.println("  EXISTS <key>                  - Check if key exists and is not expired");
         System.out.println("  KEYS                          - List all active non-expired keys");
         System.out.println("  SIZE                          - Show the number of active entries");
@@ -233,6 +277,25 @@ public class Main {
 
             System.out.println("  -> Resulting keys in store: " + store.keySet());
             System.out.println("  -> Notice 'C' was evicted because its access frequency was the lowest!");
+            System.out.println("  -> " + store.getStats());
+        }
+
+        // Demo 5: Batch Operations
+        System.out.println("\n[DEMO 5] Batch Operations (MSET, MGET, MDEL):");
+        try (KeyValueStore<String, String> store = KeyValueStoreBuilder.<String, String>create().capacity(10).build()) {
+            Map<String, String> batch = new LinkedHashMap<>();
+            batch.put("item:1", "Keyboard");
+            batch.put("item:2", "Mouse");
+            batch.put("item:3", "Monitor");
+            store.putAll(batch);
+            System.out.println("  -> MSET stored 3 items in batch: " + store.keySet());
+
+            List<String> queryKeys = Arrays.asList("item:1", "item:2", "item:999");
+            Map<String, String> found = store.getAll(queryKeys);
+            System.out.println("  -> MGET query for item:1, item:2, item:999: " + found);
+
+            int removed = store.removeAll(Arrays.asList("item:1", "item:3", "item:999"));
+            System.out.println("  -> MDEL removed " + removed + " keys, remaining: " + store.keySet());
             System.out.println("  -> " + store.getStats());
         }
 
