@@ -115,6 +115,57 @@ public class InMemoryKeyValueStore<K, V> implements KeyValueStore<K, V> {
     }
 
     @Override
+    public void putAll(Map<? extends K, ? extends V> entries) {
+        putAll(entries, defaultTtlMillis);
+    }
+
+    @Override
+    public void putAll(Map<? extends K, ? extends V> entries, long ttlMillis) {
+        Objects.requireNonNull(entries, "Entries map cannot be null");
+        if (entries.isEmpty()) {
+            return;
+        }
+
+        for (Map.Entry<? extends K, ? extends V> entry : entries.entrySet()) {
+            Objects.requireNonNull(entry.getKey(), "Key cannot be null");
+            Objects.requireNonNull(entry.getValue(), "Value cannot be null");
+        }
+
+        lock.lock();
+        try {
+            for (Map.Entry<? extends K, ? extends V> mapEntry : entries.entrySet()) {
+                K key = mapEntry.getKey();
+                V value = mapEntry.getValue();
+
+                CacheEntry<K, V> existing = dataStore.get(key);
+                if (existing != null) {
+                    CacheEntry<K, V> newEntry = new CacheEntry<>(key, value, ttlMillis);
+                    dataStore.put(key, newEntry);
+                    evictionStrategy.onUpdate(key);
+                    stats.recordPut();
+                } else {
+                    if (capacity > 0 && dataStore.size() >= capacity) {
+                        if (!pruneOneExpiredEntry()) {
+                            K victim = evictionStrategy.evict();
+                            if (victim == null) {
+                                throw new CapacityExceededException("Store capacity reached (" + capacity + ") and no victim available for eviction.");
+                            }
+                            dataStore.remove(victim);
+                            stats.recordEviction();
+                        }
+                    }
+                    CacheEntry<K, V> newEntry = new CacheEntry<>(key, value, ttlMillis);
+                    dataStore.put(key, newEntry);
+                    evictionStrategy.onInsert(key);
+                    stats.recordPut();
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
     public Optional<V> get(K key) {
         Objects.requireNonNull(key, "Key cannot be null");
         lock.lock();
@@ -145,6 +196,47 @@ public class InMemoryKeyValueStore<K, V> implements KeyValueStore<K, V> {
     }
 
     @Override
+    public Map<K, V> getAll(Collection<? extends K> keys) {
+        Objects.requireNonNull(keys, "Keys collection cannot be null");
+        if (keys.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        for (K key : keys) {
+            Objects.requireNonNull(key, "Key in collection cannot be null");
+        }
+
+        lock.lock();
+        try {
+            Map<K, V> result = new LinkedHashMap<>();
+            for (K key : keys) {
+                CacheEntry<K, V> entry = dataStore.get(key);
+                if (entry == null) {
+                    stats.recordMiss();
+                    continue;
+                }
+
+                if (entry.isExpired()) {
+                    // Lazy passive eviction on read
+                    dataStore.remove(key);
+                    evictionStrategy.onRemove(key);
+                    stats.recordExpiration();
+                    stats.recordMiss();
+                    continue;
+                }
+
+                entry.recordAccess();
+                evictionStrategy.onAccess(key);
+                stats.recordHit();
+                result.put(key, entry.getValue());
+            }
+            return Collections.unmodifiableMap(result);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
     public boolean remove(K key) {
         Objects.requireNonNull(key, "Key cannot be null");
         lock.lock();
@@ -158,6 +250,36 @@ public class InMemoryKeyValueStore<K, V> implements KeyValueStore<K, V> {
                 return true;
             }
             return false;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public int removeAll(Collection<? extends K> keys) {
+        Objects.requireNonNull(keys, "Keys collection cannot be null");
+        if (keys.isEmpty()) {
+            return 0;
+        }
+
+        for (K key : keys) {
+            Objects.requireNonNull(key, "Key in collection cannot be null");
+        }
+
+        lock.lock();
+        try {
+            int removedCount = 0;
+            for (K key : keys) {
+                CacheEntry<K, V> entry = dataStore.remove(key);
+                if (entry != null) {
+                    evictionStrategy.onRemove(key);
+                    if (entry.isExpired()) {
+                        stats.recordExpiration();
+                    }
+                    removedCount++;
+                }
+            }
+            return removedCount;
         } finally {
             lock.unlock();
         }

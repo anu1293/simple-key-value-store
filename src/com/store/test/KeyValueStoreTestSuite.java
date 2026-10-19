@@ -4,9 +4,7 @@ import com.store.api.KeyValueStore;
 import com.store.core.KeyValueStoreBuilder;
 import com.store.eviction.EvictionPolicy;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.*;
 
 /**
@@ -34,6 +32,9 @@ public class KeyValueStoreTestSuite {
         testActiveTtlCleanup();
         testConcurrentAccess();
         testStatsTracking();
+        testBatchOperations();
+        testBatchEviction();
+        testConcurrentBatchOperations();
 
         System.out.println("=================================================");
         System.out.printf("Test Results: %d Passed, %d Failed%n", testsPassed, testsFailed);
@@ -257,6 +258,196 @@ public class KeyValueStoreTestSuite {
                 assertEquals(1L, store.getStats().getMisses(), "Misses should be 1");
                 assertEquals(1L, store.getStats().getPuts(), "Puts should be 1");
                 assertEquals(66.666, store.getStats().getHitRate(), "Hit rate should be ~66.67%");
+            }
+        });
+    }
+
+    private static void testBatchOperations() {
+        runTest("testBatchOperations", () -> {
+            try (KeyValueStore<String, String> store = KeyValueStoreBuilder.<String, String>create()
+                    .capacity(10)
+                    .build()) {
+
+                // 1. putAll basic
+                Map<String, String> map = new LinkedHashMap<>();
+                map.put("k1", "v1");
+                map.put("k2", "v2");
+                map.put("k3", "v3");
+                store.putAll(map);
+
+                assertEquals(3, store.size(), "Store size should be 3 after putAll");
+                assertEquals(3L, store.getStats().getPuts(), "Stats puts should be 3");
+
+                // 2. getAll basic + miss
+                Map<String, String> fetched = store.getAll(Arrays.asList("k1", "k3", "k4"));
+                assertEquals(2, fetched.size(), "getAll should return 2 entries");
+                assertEquals("v1", fetched.get("k1"), "k1 value should match");
+                assertEquals("v3", fetched.get("k3"), "k3 value should match");
+                assertTrue(!fetched.containsKey("k4"), "k4 should not be in fetched map");
+                assertEquals(2L, store.getStats().getHits(), "Hits should be 2");
+                assertEquals(1L, store.getStats().getMisses(), "Misses should be 1");
+
+                // 3. getAll with expired key
+                store.put("exp1", "temp", 50); // 50ms TTL
+                Thread.sleep(80);
+                Map<String, String> fetchedExpired = store.getAll(Arrays.asList("k1", "exp1"));
+                assertEquals(1, fetchedExpired.size(), "Only k1 should be returned, exp1 expired");
+                assertEquals("v1", fetchedExpired.get("k1"), "k1 should match");
+                assertTrue(!fetchedExpired.containsKey("exp1"), "exp1 should be omitted due to expiration");
+                assertTrue(!store.containsKey("exp1"), "exp1 should have been lazily evicted");
+
+                // 4. removeAll
+                int removed = store.removeAll(Arrays.asList("k1", "k2", "nonExistent"));
+                assertEquals(2, removed, "removeAll should return 2 removed keys");
+                assertEquals(1, store.size(), "Only k3 should remain in store");
+                assertTrue(store.containsKey("k3"), "k3 should still be in store");
+                assertTrue(!store.containsKey("k1"), "k1 should be removed");
+                assertTrue(!store.containsKey("k2"), "k2 should be removed");
+
+                // 5. Empty collections handling
+                store.putAll(Collections.emptyMap());
+                Map<String, String> emptyGet = store.getAll(Collections.emptyList());
+                assertTrue(emptyGet.isEmpty(), "Empty getAll should return empty map");
+                int zeroRemoved = store.removeAll(Collections.emptyList());
+                assertEquals(0, zeroRemoved, "Empty removeAll should return 0");
+
+                // 6. Null checks
+                boolean caughtNullMap = false;
+                try {
+                    store.putAll(null);
+                } catch (NullPointerException e) {
+                    caughtNullMap = true;
+                }
+                assertTrue(caughtNullMap, "putAll(null) must throw NullPointerException");
+
+                boolean caughtNullKey = false;
+                try {
+                    Map<String, String> badMap = new HashMap<>();
+                    badMap.put(null, "val");
+                    store.putAll(badMap);
+                } catch (NullPointerException e) {
+                    caughtNullKey = true;
+                }
+                assertTrue(caughtNullKey, "putAll with null key must throw NullPointerException");
+
+                boolean caughtNullVal = false;
+                try {
+                    Map<String, String> badMap = new HashMap<>();
+                    badMap.put("validKey", null);
+                    store.putAll(badMap);
+                } catch (NullPointerException e) {
+                    caughtNullVal = true;
+                }
+                assertTrue(caughtNullVal, "putAll with null value must throw NullPointerException");
+
+                boolean caughtGetAllNull = false;
+                try {
+                    store.getAll(null);
+                } catch (NullPointerException e) {
+                    caughtGetAllNull = true;
+                }
+                assertTrue(caughtGetAllNull, "getAll(null) must throw NullPointerException");
+
+                boolean caughtRemoveAllNull = false;
+                try {
+                    store.removeAll(null);
+                } catch (NullPointerException e) {
+                    caughtRemoveAllNull = true;
+                }
+                assertTrue(caughtRemoveAllNull, "removeAll(null) must throw NullPointerException");
+            }
+        });
+    }
+
+    private static void testBatchEviction() {
+        runTest("testBatchEviction", () -> {
+            try (KeyValueStore<String, String> store = KeyValueStoreBuilder.<String, String>create()
+                    .capacity(3)
+                    .evictionPolicy(EvictionPolicy.LRU)
+                    .build()) {
+
+                Map<String, String> initial = new LinkedHashMap<>();
+                initial.put("k1", "1");
+                initial.put("k2", "2");
+                initial.put("k3", "3");
+                store.putAll(initial);
+
+                assertEquals(3, store.size(), "Size should be 3");
+
+                // Access k1 to make k2 the least recently used
+                store.get("k1");
+
+                // Batch insert k4 and k5
+                Map<String, String> batch2 = new LinkedHashMap<>();
+                batch2.put("k4", "4");
+                batch2.put("k5", "5");
+                store.putAll(batch2);
+
+                assertEquals(3, store.size(), "Size must not exceed capacity 3");
+                assertEquals(2L, store.getStats().getEvictions(), "Should have evicted 2 items");
+                assertTrue(!store.containsKey("k2"), "k2 was LRU victim and should be evicted");
+                assertTrue(!store.containsKey("k3"), "k3 was next LRU victim and should be evicted");
+                assertTrue(store.containsKey("k1"), "k1 was recently accessed and kept");
+                assertTrue(store.containsKey("k4"), "k4 should be present");
+                assertTrue(store.containsKey("k5"), "k5 should be present");
+            }
+        });
+    }
+
+    private static void testConcurrentBatchOperations() {
+        runTest("testConcurrentBatchOperations", () -> {
+            int threadCount = 6;
+            int batchesPerThread = 100;
+            ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+
+            try (KeyValueStore<String, Integer> store = KeyValueStoreBuilder.<String, Integer>create()
+                    .capacity(100)
+                    .evictionPolicy(EvictionPolicy.LRU)
+                    .build()) {
+
+                List<Callable<Void>> tasks = new ArrayList<>();
+                for (int t = 0; t < threadCount; t++) {
+                    final int threadId = t;
+                    tasks.add(() -> {
+                        for (int i = 0; i < batchesPerThread; i++) {
+                            // Batch put
+                            Map<String, Integer> batch = new HashMap<>();
+                            batch.put("thread-" + threadId + "-key-A", i);
+                            batch.put("thread-" + threadId + "-key-B", i * 2);
+                            batch.put("shared-key-" + (i % 10), threadId * 100 + i);
+                            store.putAll(batch);
+
+                            // Batch get
+                            Map<String, Integer> fetched = store.getAll(Arrays.asList(
+                                    "thread-" + threadId + "-key-A",
+                                    "thread-" + threadId + "-key-B",
+                                    "shared-key-" + (i % 10),
+                                    "nonexistent-key"
+                            ));
+                            assertTrue(fetched.size() <= 4, "Fetched count should be at most 4");
+
+                            // Batch remove
+                            if (i % 5 == 0) {
+                                store.removeAll(Arrays.asList(
+                                        "thread-" + threadId + "-key-A",
+                                        "thread-" + threadId + "-key-B"
+                                ));
+                            }
+                        }
+                        return null;
+                    });
+                }
+
+                List<Future<Void>> futures = executor.invokeAll(tasks);
+                for (Future<Void> f : futures) {
+                    f.get(10, TimeUnit.SECONDS);
+                }
+
+                assertTrue(store.size() <= 100, "Store size must not exceed capacity 100");
+                assertTrue(store.getStats().getPuts() > 0, "Puts must be recorded");
+                assertTrue(store.getStats().getHits() > 0, "Hits must be recorded");
+            } finally {
+                executor.shutdownNow();
             }
         });
     }
