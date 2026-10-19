@@ -1,0 +1,17 @@
+﻿# Compiled class files
+out/
+bin/
+*.class
+
+# Log files
+*.log
+
+# IntelliJ IDEA project files
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/shelf/
+*.iws
+
+# OS files
+Thumbs.db
+.DS_Store
