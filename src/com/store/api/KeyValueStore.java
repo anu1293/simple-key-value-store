@@ -4,7 +4,7 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Generic interface for an in-memory key-value store.
+ * Generic interface for an in-memory key-value store with Optimistic Concurrency Control (OCC).
  *
  * @param <K> the type of keys maintained by this store
  * @param <V> the type of mapped values
@@ -34,6 +34,70 @@ public interface KeyValueStore<K, V> extends AutoCloseable {
     default V getOrDefault(K key, V defaultValue) {
         return get(key).orElse(defaultValue);
     }
+
+    /**
+     * Retrieves the value snapshot along with its version metadata for Optimistic Concurrency Control.
+     * Returns an empty Optional if key not found or expired.
+     */
+    Optional<VersionedValue<V>> getVersioned(K key);
+
+    /**
+     * Atomically sets the value to newValue if the current value equals expectedValue.
+     * Uses default TTL.
+     *
+     * @return true if successful, false if expectedValue did not match or key not found
+     */
+    default boolean compareAndSet(K key, V expectedValue, V newValue) {
+        return compareAndSet(key, expectedValue, newValue, -1L);
+    }
+
+    /**
+     * Atomically sets the value to newValue with custom TTL if the current value equals expectedValue.
+     *
+     * @return true if successful, false if expectedValue did not match or key not found
+     */
+    boolean compareAndSet(K key, V expectedValue, V newValue, long ttlMillis);
+
+    /**
+     * Atomically updates the value if the current entry version matches expectedVersion.
+     * Uses default TTL.
+     *
+     * @return true if update succeeded, false if version mismatched or entry not found/expired
+     */
+    default boolean putIfVersion(K key, V newValue, long expectedVersion) {
+        return putIfVersion(key, newValue, -1L, expectedVersion);
+    }
+
+    /**
+     * Atomically updates the value with custom TTL if the current entry version matches expectedVersion.
+     *
+     * @return true if update succeeded, false if version mismatched or entry not found/expired
+     */
+    boolean putIfVersion(K key, V newValue, long ttlMillis, long expectedVersion);
+
+    /**
+     * Atomically inserts the key-value pair only if the key is not already present or has expired.
+     * Uses default TTL.
+     *
+     * @return true if inserted, false if key already exists
+     */
+    default boolean putIfAbsent(K key, V value) {
+        return putIfAbsent(key, value, -1L);
+    }
+
+    /**
+     * Atomically inserts the key-value pair with custom TTL only if the key is not already present or has expired.
+     *
+     * @return true if inserted, false if key already exists
+     */
+    boolean putIfAbsent(K key, V value, long ttlMillis);
+
+    /**
+     * Atomically removes the entry only if its current version matches expectedVersion.
+     *
+     * @return true if removed, false if version mismatched or entry not found/expired
+     */
+    boolean removeIfVersion(K key, long expectedVersion);
 
     /**
      * Removes the key-value mapping if present.

@@ -1,6 +1,7 @@
 package com.store;
 
 import com.store.api.KeyValueStore;
+import com.store.api.VersionedValue;
 import com.store.core.KeyValueStoreBuilder;
 import com.store.eviction.EvictionPolicy;
 
@@ -89,6 +90,65 @@ public class Main {
                         }
                         break;
 
+                    case "GETVER":
+                        if (parts.length < 2) {
+                            System.out.println("Usage: GETVER <key>");
+                        } else {
+                            Optional<VersionedValue<String>> snap = store.getVersioned(parts[1]);
+                            if (snap.isPresent()) {
+                                VersionedValue<String> v = snap.get();
+                                System.out.printf("Value: %s | Version: %d | RemainingTTL: %s%n",
+                                        v.getValue(),
+                                        v.getVersion(),
+                                        v.getRemainingTtlMillis() < 0 ? "INFINITY" : v.getRemainingTtlMillis() + "ms");
+                            } else {
+                                System.out.println("(nil)");
+                            }
+                        }
+                        break;
+
+                    case "CAS":
+                        if (parts.length < 4) {
+                            System.out.println("Usage: CAS <key> <expectedValue> <newValue> [ttlMillis]");
+                        } else {
+                            String key = parts[1];
+                            String expected = parts[2];
+                            String newVal = parts[3];
+                            long ttl = parts.length >= 5 ? Long.parseLong(parts[4]) : -1L;
+                            boolean success = store.compareAndSet(key, expected, newVal, ttl);
+                            System.out.println(success ? "OK: Swapped" : "FAIL: Value mismatch or key expired/absent");
+                        }
+                        break;
+
+                    case "PUTVER":
+                        if (parts.length < 4) {
+                            System.out.println("Usage: PUTVER <key> <newValue> <expectedVersion> [ttlMillis]");
+                        } else {
+                            String key = parts[1];
+                            String newVal = parts[2];
+                            try {
+                                long expectedVer = Long.parseLong(parts[3]);
+                                long ttl = parts.length >= 5 ? Long.parseLong(parts[4]) : -1L;
+                                boolean success = store.putIfVersion(key, newVal, ttl, expectedVer);
+                                System.out.println(success ? "OK: Updated with new version" : "FAIL: Version mismatch or key expired/absent");
+                            } catch (NumberFormatException e) {
+                                System.out.println("Error: expectedVersion must be a valid integer.");
+                            }
+                        }
+                        break;
+
+                    case "SETNX":
+                        if (parts.length < 3) {
+                            System.out.println("Usage: SETNX <key> <value> [ttlMillis]");
+                        } else {
+                            String key = parts[1];
+                            String val = parts[2];
+                            long ttl = parts.length >= 4 ? Long.parseLong(parts[3]) : -1L;
+                            boolean success = store.putIfAbsent(key, val, ttl);
+                            System.out.println(success ? "OK: Inserted" : "FAIL: Key already exists");
+                        }
+                        break;
+
                     case "DEL":
                     case "DELETE":
                         if (parts.length < 2) {
@@ -139,16 +199,20 @@ public class Main {
 
     private static void printHelp() {
         System.out.println("Available Commands:");
-        System.out.println("  PUT <key> <value> [ttlMillis] - Insert or update a key with optional TTL (ms)");
-        System.out.println("  GET <key>                     - Retrieve the value for a key");
-        System.out.println("  DEL <key>                     - Delete a key from the store");
-        System.out.println("  EXISTS <key>                  - Check if key exists and is not expired");
-        System.out.println("  KEYS                          - List all active non-expired keys");
-        System.out.println("  SIZE                          - Show the number of active entries");
-        System.out.println("  STATS                         - Show cache hits, misses, hit rate, evictions");
-        System.out.println("  CLEAR                         - Flush all keys from the store");
-        System.out.println("  DEMO                          - Run an automated live showcase of features");
-        System.out.println("  EXIT / QUIT                   - Exit the console");
+        System.out.println("  PUT <key> <value> [ttlMillis]          - Insert or update a key with optional TTL (ms)");
+        System.out.println("  GET <key>                              - Retrieve the value for a key");
+        System.out.println("  GETVER <key>                           - Retrieve the value snapshot and version tag");
+        System.out.println("  CAS <key> <expectedVal> <newVal> [ttl] - Compare-and-Set value atomically");
+        System.out.println("  PUTVER <key> <newVal> <ver> [ttl]      - Optimistic conditional write matching version tag");
+        System.out.println("  SETNX <key> <value> [ttl]              - Put if absent (only if key does not exist)");
+        System.out.println("  DEL <key>                              - Delete a key from the store");
+        System.out.println("  EXISTS <key>                           - Check if key exists and is not expired");
+        System.out.println("  KEYS                                   - List all active non-expired keys");
+        System.out.println("  SIZE                                   - Show the number of active entries");
+        System.out.println("  STATS                                  - Show cache hits, misses, hit rate, evictions, CAS metrics");
+        System.out.println("  CLEAR                                  - Flush all keys from the store");
+        System.out.println("  DEMO                                   - Run an automated live showcase of features");
+        System.out.println("  EXIT / QUIT                            - Exit the console");
     }
 
     public static void runAutomatedDemonstrations() {
@@ -233,6 +297,37 @@ public class Main {
 
             System.out.println("  -> Resulting keys in store: " + store.keySet());
             System.out.println("  -> Notice 'C' was evicted because its access frequency was the lowest!");
+            System.out.println("  -> " + store.getStats());
+        }
+
+        // Demo 5: Optimistic Concurrency Control (OCC) and CAS
+        System.out.println("\n[DEMO 5] Optimistic Concurrency Control (OCC) & Versioning / CAS:");
+        try (KeyValueStore<String, String> store = KeyValueStoreBuilder.<String, String>create()
+                .capacity(5)
+                .build()) {
+            System.out.println("  -> Initializing balance=100...");
+            store.put("account:1", "100");
+            VersionedValue<String> snap = store.getVersioned("account:1").get();
+            System.out.printf("  -> Read snapshot: Value=%s, Version=%d%n", snap.getValue(), snap.getVersion());
+
+            System.out.println("  -> Client A and Client B both read version 1.");
+            long clientAVersion = snap.getVersion();
+            long clientBVersion = snap.getVersion();
+
+            System.out.println("  -> Client A updates balance to 150 matching version 1...");
+            boolean successA = store.putIfVersion("account:1", "150", clientAVersion);
+            System.out.println("  -> Client A update result: " + (successA ? "SUCCESS" : "FAILED"));
+
+            System.out.println("  -> Client B tries to update balance to 120 using stale version 1...");
+            boolean successB = store.putIfVersion("account:1", "120", clientBVersion);
+            System.out.println("  -> Client B update result: " + (successB ? "SUCCESS" : "FAILED (OCC detected conflict!)"));
+
+            VersionedValue<String> finalSnap = store.getVersioned("account:1").get();
+            System.out.printf("  -> Final account:1: Value=%s, Version=%d%n", finalSnap.getValue(), finalSnap.getVersion());
+
+            System.out.println("  -> Testing Compare-And-Set (CAS)...");
+            boolean casSuccess = store.compareAndSet("account:1", "150", "200");
+            System.out.println("  -> CAS from 150 -> 200: " + (casSuccess ? "SUCCESS" : "FAILED"));
             System.out.println("  -> " + store.getStats());
         }
 
